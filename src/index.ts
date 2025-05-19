@@ -227,136 +227,55 @@ export default {
 	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
 		
+		// IMPORTANT: Keep the SSE endpoints intact
+		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
+			// @ts-ignore
+			return MovieRecommenderMCP.serveSSE("/sse").fetch(request, env, ctx);
+		}
+		
 		// Get or create session ID
 		let sessionId = url.searchParams.get("sessionId");
 		if (!sessionId) {
 			sessionId = crypto.randomUUID();
 		}
 		
-		// Routes for stateless version (demo purposes)
-		if (url.pathname === "/stateless/mcp") {
-			// Create a new instance without state for each request
-			const statelessMCP = new MovieRecommenderMCP();
-			return statelessMCP.serve("/stateless/mcp").fetch(request, env, ctx);
-		}
-		
-		// Routes for stateful version using Durable Objects
+		// MCP endpoint for stateless or Durable Object usage
 		if (url.pathname === "/mcp") {
-			// Get Durable Object stub using sessionId
-			const id = env.MovieRecommenderState.idFromString(sessionId);
-			const stub = env.MovieRecommenderState.get(id);
+			// If sessionId provided, use Durable Object for stateful behavior
+			if (sessionId) {
+				// Get Durable Object stub using sessionId
+				const id = env.MovieRecommenderState.idFromString(sessionId);
+				const stub = env.MovieRecommenderState.get(id);
+				
+				// Forward request to Durable Object
+				const doRequest = new Request(request);
+				const response = await stub.fetch(doRequest);
+				
+				// Add sessionId to response if not already present
+				const responseType = response.headers.get("Content-Type");
+				if (responseType && responseType.includes("application/json")) {
+					const responseData = await response.json();
+					if (!responseData.sessionId) {
+						return new Response(JSON.stringify({
+							...responseData,
+							sessionId
+						}), {
+							headers: { "Content-Type": "application/json" }
+						});
+					}
+					return new Response(JSON.stringify(responseData), {
+						headers: { "Content-Type": "application/json" }
+					});
+				}
+				return response;
+			}
 			
-			// Forward request to Durable Object
-			const response = await stub.fetch(request);
-			const responseData = await response.json();
-			
-			// Return response with session ID included for client reference
-			return new Response(JSON.stringify({
-				sessionId,
-				...responseData
-			}), {
-				headers: { "Content-Type": "application/json" }
-			});
+			// Fallback to stateless behavior if no sessionId
+			// @ts-ignore
+			return MovieRecommenderMCP.serve("/mcp").fetch(request, env, ctx);
 		}
 		
-		// Simple HTML UI for demo purposes
-		if (url.pathname === "/" || url.pathname === "") {
-			return new Response(`
-				<!DOCTYPE html>
-				<html>
-				<head>
-					<title>CloudFlare Stateful MCP Demo</title>
-					<style>
-						body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-						.container { display: flex; gap: 20px; }
-						.panel { flex: 1; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
-						button { padding: 8px 16px; background: #0051c3; color: white; border: none; border-radius: 5px; cursor: pointer; }
-						input, textarea { width: 100%; padding: 8px; margin-bottom: 10px; box-sizing: border-box; }
-						h2 { color: #0051c3; }
-						.response { white-space: pre-wrap; background: #f5f5f5; padding: 10px; border-radius: 5px; }
-					</style>
-				</head>
-				<body>
-					<h1>CloudFlare Stateful MCP Demo</h1>
-					<div class="container">
-						<div class="panel">
-							<h2>Stateless MCP</h2>
-							<input type="text" id="statelessInput" placeholder="e.g., 'I need a movie recommendation'">
-							<button onclick="sendStateless()">Send</button>
-							<div id="statelessResponse" class="response"></div>
-						</div>
-						<div class="panel">
-							<h2>Stateful MCP</h2>
-							<input type="text" id="statefulInput" placeholder="e.g., 'I need a movie recommendation'">
-							<button onclick="sendStateful()">Send</button>
-							<div id="statefulResponse" class="response"></div>
-							<div id="sessionId" style="margin-top: 10px; font-size: 12px;"></div>
-						</div>
-					</div>
-					<script>
-						let currentSessionId = "";
-						
-						async function sendStateless() {
-							const input = document.getElementById('statelessInput').value;
-							const response = document.getElementById('statelessResponse');
-							response.innerText = "Loading...";
-							
-							try {
-								const result = await fetch('/stateless/mcp', {
-									method: 'POST',
-									headers: { 'Content-Type': 'application/json' },
-									body: JSON.stringify({ message: input })
-								});
-								const data = await result.json();
-								response.innerText = data.content[0].text;
-								document.getElementById('statelessInput').value = "";
-							} catch (error) {
-								response.innerText = "Error: " + error.message;
-							}
-						}
-						
-						async function sendStateful() {
-							const input = document.getElementById('statefulInput').value;
-							const response = document.getElementById('statefulResponse');
-							response.innerText = "Loading...";
-							
-							try {
-								const url = currentSessionId 
-									? '/mcp?sessionId=' + currentSessionId 
-									: '/mcp';
-									
-								const result = await fetch(url, {
-									method: 'POST',
-									headers: { 'Content-Type': 'application/json' },
-									body: JSON.stringify({ message: input })
-								});
-								const data = await result.json();
-								response.innerText = data.content[0].text;
-								
-								if (data.sessionId) {
-									currentSessionId = data.sessionId;
-									document.getElementById('sessionId').innerText = "Session ID: " + currentSessionId;
-								}
-								
-								document.getElementById('statefulInput').value = "";
-							} catch (error) {
-								response.innerText = "Error: " + error.message;
-							}
-						}
-					</script>
-				</body>
-				</html>
-			`, {
-				headers: { "Content-Type": "text/html" }
-			});
-		}
-		
-		// Default response with session ID information
-		return new Response(JSON.stringify({ 
-			sessionId,
-			message: "Use this sessionId parameter with your requests to maintain state" 
-		}), {
-			headers: { "Content-Type": "application/json" }
-		});
+		// Default response
+		return new Response("Not found", { status: 404 });
 	},
 };
