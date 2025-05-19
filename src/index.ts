@@ -2,47 +2,65 @@ import { McpAgent } from "agents/mcp";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
-// Define our stateful MCP agent with movie recommendation tools
+// Define our MCP agent with tools
 export class MyMCP extends McpAgent {
 	server = new McpServer({
-		name: "Stateful Movie Recommender",
+		name: "Movie Recommender",
 		version: "1.0.0",
 	});
-
-	// Properties for state management via DO
-	private state?: DurableObjectState;
-	private env?: Env;
-	private preferences: {
-		genres: string[];
-		dislikedMovies: string[];
-	} = {
-		genres: [],
-		dislikedMovies: []
+    
+	// Keep track of user preferences in memory (for simplicity)
+	private preferences = {
+		genres: [] as string[],
+		dislikedMovies: [] as string[]
 	};
 
-	// Constructor to enable Durable Object state handling
-	constructor(state?: DurableObjectState, env?: Env) {
-		super();
-		if (state && env) {
-			this.state = state;
-			this.env = env;
-			// Initialize state from storage
-			this.initState();
-		}
-	}
-
-	// Load state from Durable Object storage
-	async initState() {
-		if (this.state) {
-			this.preferences = await this.state.storage.get("preferences") || {
-				genres: [],
-				dislikedMovies: []
-			};
-		}
-	}
-
 	async init() {
-		// Movie recommendation tool
+		// Original calculator tools (kept for reference)
+		this.server.tool(
+			"add",
+			{ a: z.number(), b: z.number() },
+			async ({ a, b }) => ({
+				content: [{ type: "text", text: String(a + b) }],
+			})
+		);
+		this.server.tool(
+			"calculate",
+			{
+				operation: z.enum(["add", "subtract", "multiply", "divide"]),
+				a: z.number(),
+				b: z.number(),
+			},
+			async ({ operation, a, b }) => {
+				let result: number;
+				switch (operation) {
+					case "add":
+						result = a + b;
+						break;
+					case "subtract":
+						result = a - b;
+						break;
+					case "multiply":
+						result = a * b;
+						break;
+					case "divide":
+						if (b === 0)
+							return {
+								content: [
+									{
+										type: "text",
+										text: "Error: Cannot divide by zero",
+									},
+								],
+							};
+						result = a / b;
+						break;
+				}
+				return { content: [{ type: "text", text: String(result) }] };
+			}
+		);
+
+		// New movie recommendation tool
 		this.server.tool(
 			"recommendMovies",
 			{ 
@@ -50,7 +68,7 @@ export class MyMCP extends McpAgent {
 			},
 			async ({ query }) => {
 				// Update preferences based on the query
-				await this.updatePreferences(query);
+				this.updatePreferences(query);
 				
 				// Generate recommendations based on preferences
 				const recommendations = this.getRecommendations();
@@ -76,41 +94,10 @@ export class MyMCP extends McpAgent {
 				};
 			}
 		);
-
-		// Feedback tool to track liked/disliked movies
-		this.server.tool(
-			"movieFeedback",
-			{
-				movie: z.string(),
-				liked: z.boolean()
-			},
-			async ({ movie, liked }) => {
-				if (!liked) {
-					// Add to disliked movies if not already there
-					const movieLower = movie.toLowerCase();
-					if (!this.preferences.dislikedMovies.includes(movieLower)) {
-						this.preferences.dislikedMovies.push(movieLower);
-						// Save updated preferences
-						if (this.state) {
-							await this.state.storage.put("preferences", this.preferences);
-						}
-					}
-				}
-				
-				return {
-					content: [{ 
-						type: "text", 
-						text: liked 
-							? `Great! I'll recommend more movies like "${movie}" in the future.` 
-							: `I've noted that you didn't enjoy "${movie}". I'll avoid recommending similar movies.`
-					}],
-				};
-			}
-		);
 	}
 	
 	// Extract and update preferences from the query
-	async updatePreferences(query: string) {
+	updatePreferences(query: string) {
 		const lowerQuery = query.toLowerCase();
 		
 		// Extract genres
@@ -118,12 +105,9 @@ export class MyMCP extends McpAgent {
 			"action", "comedy", "drama", "sci-fi", "horror"
 		];
 		
-		let preferencesUpdated = false;
-		
 		genres.forEach(genre => {
 			if (lowerQuery.includes(genre) && !this.preferences.genres.includes(genre)) {
 				this.preferences.genres.push(genre);
-				preferencesUpdated = true;
 			}
 		});
 		
@@ -139,14 +123,8 @@ export class MyMCP extends McpAgent {
 			movies.forEach(movie => {
 				if (lowerQuery.includes(movie) && !this.preferences.dislikedMovies.includes(movie)) {
 					this.preferences.dislikedMovies.push(movie);
-					preferencesUpdated = true;
 				}
 			});
-		}
-		
-		// Save updated preferences to Durable Object storage
-		if (preferencesUpdated && this.state) {
-			await this.state.storage.put("preferences", this.preferences);
 		}
 	}
 	
@@ -193,89 +171,22 @@ export class MyMCP extends McpAgent {
 	}
 }
 
-// Durable Object for state management
-export class MovieRecommenderState {
-	private state: DurableObjectState;
-	private env: Env;
-	private mcp: MovieRecommenderMCP;
-
-	constructor(state: DurableObjectState, env: Env) {
-		this.state = state;
-		this.env = env;
-		this.mcp = new MovieRecommenderMCP(state, env);
-	}
-	
-	async fetch(request: Request) {
-		const url = new URL(request.url);
-		
-		if (url.pathname === "/mcp") {
-			return this.mcp.serve("/mcp").fetch(request, this.env, null);
-		}
-		
-		return new Response("Not found", { status: 404 });
-	}
-}
-
-// Define the Env interface to include our Durable Object
-interface Env {
-	MovieRecommenderState: DurableObjectNamespace;
-	// Add other environment bindings as needed
-}
-
-// Worker script that routes requests to appropriate handlers
+// Keep the original worker script exactly as is
 export default {
-	async fetch(request: Request, env: Env, ctx: ExecutionContext) {
+	fetch(request: Request, env: Env, ctx: ExecutionContext) {
 		const url = new URL(request.url);
-		
-		// IMPORTANT: Keep the SSE endpoints intact
 		if (url.pathname === "/sse" || url.pathname === "/sse/message") {
 			// @ts-ignore
-			return MovieRecommenderMCP.serveSSE("/sse").fetch(request, env, ctx);
+			return MyMCP.serveSSE("/sse").fetch(request, env, ctx);
 		}
-		
-		// Get or create session ID
-		let sessionId = url.searchParams.get("sessionId");
-		if (!sessionId) {
-			sessionId = crypto.randomUUID();
-		}
-		
-		// MCP endpoint for stateless or Durable Object usage
 		if (url.pathname === "/mcp") {
-			// If sessionId provided, use Durable Object for stateful behavior
-			if (sessionId) {
-				// Get Durable Object stub using sessionId
-				const id = env.MovieRecommenderState.idFromString(sessionId);
-				const stub = env.MovieRecommenderState.get(id);
-				
-				// Forward request to Durable Object
-				const doRequest = new Request(request);
-				const response = await stub.fetch(doRequest);
-				
-				// Add sessionId to response if not already present
-				const responseType = response.headers.get("Content-Type");
-				if (responseType && responseType.includes("application/json")) {
-					const responseData = await response.json();
-					if (!responseData.sessionId) {
-						return new Response(JSON.stringify({
-							...responseData,
-							sessionId
-						}), {
-							headers: { "Content-Type": "application/json" }
-						});
-					}
-					return new Response(JSON.stringify(responseData), {
-						headers: { "Content-Type": "application/json" }
-					});
-				}
-				return response;
-			}
-			
-			// Fallback to stateless behavior if no sessionId
 			// @ts-ignore
-			return MovieRecommenderMCP.serve("/mcp").fetch(request, env, ctx);
+			return MyMCP.serve("/mcp").fetch(request, env, ctx);
 		}
-		
-		// Default response
 		return new Response("Not found", { status: 404 });
 	},
 };
+
+interface Env {
+  MCP_OBJECT: DurableObjectNamespace;
+}
