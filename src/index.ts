@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 // Define our stateful MCP agent with movie recommendation tools
-export class MovieRecommenderMCP extends McpAgent {
+export class MyMCP extends McpAgent {
 	server = new McpServer({
 		name: "Stateful Movie Recommender",
 		version: "1.0.0",
